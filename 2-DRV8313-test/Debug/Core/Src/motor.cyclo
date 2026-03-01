@@ -1,0 +1,6 @@
+../Core/Src/motor.c:50:17:DutyToCCR	1
+../Core/Src/motor.c:56:13:SetPhases	1
+../Core/Src/motor.c:64:13:CommutateStep	1
+../Core/Src/motor.c:72:13:Motor_RunCycle	2
+../Core/Src/motor.c:83:6:Motor_Init	1
+../Core/Src/motor.c:97:6:Motor_Loop	1
