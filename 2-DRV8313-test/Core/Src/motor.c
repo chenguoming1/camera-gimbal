@@ -1,81 +1,53 @@
 /* ===========================================================
  * motor.c
- * DRV8313 Open-Loop 6-Step Commutation Driver
- * Motor 0: IN1=PA7 (TIM3_CH2), IN2=PB0 (TIM3_CH3), IN3=PB1 (TIM3_CH4)
- * Target: STM32F103RCT6
+ * DRV8313 Motor Driver — Static FOC Position Hold
+ *
+ * HOW POSITION HOLD WORKS:
+ *   A 3-phase BLDC motor has 3 coils 120° apart. If you inject
+ *   a sinusoidal current pattern into all 3 phases at a fixed
+ *   electrical angle, the rotor's permanent magnet locks onto
+ *   the resulting magnetic field and holds that position.
+ *
+ *   Phase A = sin(angle)
+ *   Phase B = sin(angle + 120°)
+ *   Phase C = sin(angle + 240°)
+ *
+ *   Since the DRV8313 can only source (not sink) on each output,
+ *   we shift and scale the sine waves to the range 0..ARR:
+ *
+ *   CCR = (sin(angle) + 1.0) / 2.0 * ARR * strength/100
+ *
  * ===========================================================*/
 
 #include "main.h"
 #include "motor.h"
+#include <math.h>
 
-/* ---- Private types -------------------------------------- */
-typedef struct
-{
-    uint32_t a;   /* Phase A (PA7 - TIM3_CH2) */
-    uint32_t b;   /* Phase B (PB0 - TIM3_CH3) */
-    uint32_t c;   /* Phase C (PB1 - TIM3_CH4) */
-} PhaseState;
+/* ---- Private defines ------------------------------------ */
+#define DEG2RAD(x)   ((x) * 3.14159265f / 180.0f)
 
 /* ---- Private variables ---------------------------------- */
 static TIM_HandleTypeDef *_htim = NULL;
 
-/* ---- 6-Step commutation table ---------------------------
- *
- *  Step |  A(PA7) | B(PB0) | C(PB1) | Current path
- *  -----+---------+--------+--------+-------------
- *   0   |   PWM   |   0    |   0    | A → B
- *   1   |   PWM   |   0    |   0    | A → C
- *   2   |    0    |  PWM   |   0    | B → C
- *   3   |    0    |  PWM   |   0    | B → A
- *   4   |    0    |   0    |  PWM   | C → A
- *   5   |    0    |   0    |  PWM   | C → B
- *
- *  INx = PWM  → high side switching, current flows out
- *  INx = 0    → low side on, current flows in (return path)
- * --------------------------------------------------------- */
-static const PhaseState COMMUTATION_TABLE[6] =
-{
-    /* A      B      C  */
-    {1,      0,     0},   /* step 0: A+ B- */
-    {1,      0,     0},   /* step 1: A+ C- */
-    {0,      1,     0},   /* step 2: B+ C- */
-    {0,      1,     0},   /* step 3: B+ A- */
-    {0,      0,     1},   /* step 4: C+ A- */
-    {0,      0,     1},   /* step 5: C+ B- */
-};
-
 /* ---- Private functions ---------------------------------- */
 
-/* Convert duty % to timer compare value */
-static uint32_t DutyToCCR(uint32_t percent)
+/* Apply raw compare values directly to the 3 TIM3 channels */
+static void SetPhases(uint32_t ccr_a, uint32_t ccr_b, uint32_t ccr_c)
 {
-    return (percent * (PWM_ARR + 1)) / 100;
+    __HAL_TIM_SET_COMPARE(_htim, TIM_CHANNEL_2, ccr_a); /* PA7 - IN1 */
+    __HAL_TIM_SET_COMPARE(_htim, TIM_CHANNEL_3, ccr_b); /* PB0 - IN2 */
+    __HAL_TIM_SET_COMPARE(_htim, TIM_CHANNEL_4, ccr_c); /* PB1 - IN3 */
 }
 
-/* Apply phase voltages to TIM3 channels */
-static void SetPhases(uint32_t dutyA, uint32_t dutyB, uint32_t dutyC)
+/* Convert a sine value (-1..1) to a PWM compare register value.
+ * Shifts and scales into 0..ARR range, then applies strength. */
+static uint32_t SineToCCR(float sine_val, uint8_t strength)
 {
-    __HAL_TIM_SET_COMPARE(_htim, TIM_CHANNEL_2, dutyA); /* PA7 - IN1 */
-    __HAL_TIM_SET_COMPARE(_htim, TIM_CHANNEL_3, dutyB); /* PB0 - IN2 */
-    __HAL_TIM_SET_COMPARE(_htim, TIM_CHANNEL_4, dutyC); /* PB1 - IN3 */
-}
-
-/* Execute one electrical step from the commutation table */
-static void CommutateStep(uint8_t step, uint32_t duty)
-{
-    const PhaseState *s = &COMMUTATION_TABLE[step];
-    SetPhases(s->a * duty, s->b * duty, s->c * duty);
-}
-
-/* Run one full electrical cycle (6 steps = 1 mechanical revolution
- * for a 1 pole-pair motor, or a fraction for multi-pole motors)    */
-static void Motor_RunCycle(uint32_t duty, uint32_t step_delay_ms)
-{
-    for (uint8_t i = 0; i < 6; i++)
-    {
-        CommutateStep(i, duty);
-        HAL_Delay(step_delay_ms);
-    }
+    float scaled = (sine_val + 1.0f) / 2.0f;          /* 0.0 .. 1.0  */
+    scaled *= (float)(PWM_ARR + 1);                    /* 0 .. ARR+1  */
+    scaled *= (float)strength / 100.0f;                /* apply gain  */
+    if (scaled > PWM_ARR) scaled = PWM_ARR;
+    return (uint32_t)scaled;
 }
 
 /* ---- Public functions ----------------------------------- */
@@ -84,22 +56,50 @@ void Motor_Init(TIM_HandleTypeDef *htim)
 {
     _htim = htim;
 
-    /* Start PWM output on all 3 channels */
     HAL_TIM_PWM_Start(_htim, TIM_CHANNEL_2); /* PA7 - IN1 */
     HAL_TIM_PWM_Start(_htim, TIM_CHANNEL_3); /* PB0 - IN2 */
     HAL_TIM_PWM_Start(_htim, TIM_CHANNEL_4); /* PB1 - IN3 */
 
-    /* All phases off initially */
     SetPhases(0, 0, 0);
     HAL_Delay(100);
 }
 
-void Motor_Loop(void)
+void Motor_HoldPosition(float angle_deg, uint8_t strength)
 {
-    uint32_t duty = DutyToCCR(PWM_DUTY_PERCENT);
+    /* Compute the 3-phase sinusoidal voltages at this angle */
+    float a = sinf(DEG2RAD(angle_deg));
+    float b = sinf(DEG2RAD(angle_deg + 120.0f));
+    float c = sinf(DEG2RAD(angle_deg + 240.0f));
 
+    SetPhases(SineToCCR(a, strength),
+              SineToCCR(b, strength),
+              SineToCCR(c, strength));
+}
+
+void Motor_Coast(void)
+{
+    /* All phases off — rotor spins freely */
+    SetPhases(0, 0, 0);
+}
+
+void Motor_SweepTest(void)
+{
+    /* --- Phase 1: Slowly rotate 2 full electrical cycles ---
+     * This confirms the motor moves and all phases are wired correctly.
+     * Watch the shaft — it should rotate smoothly.              */
+    for (int i = 0; i < 720; i++)
+    {
+        Motor_HoldPosition((float)i, HOLD_STRENGTH);
+        HAL_Delay(10);   /* 10ms per degree = ~3.6 sec per revolution */
+    }
+
+    /* --- Phase 2: Freeze at 0° and hold ---
+     * Motor should now resist any attempt to rotate it by hand.
+     * If it does, your motor and DRV8313 are working correctly. */
     while (1)
     {
-        Motor_RunCycle(duty, STEP_DELAY_MS);
+        Motor_HoldPosition(0.0f, HOLD_STRENGTH);
+        HAL_Delay(1);
     }
 }
+

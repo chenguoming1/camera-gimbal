@@ -1,6 +1,6 @@
-../Core/Src/motor.c:50:17:DutyToCCR	16	static
-../Core/Src/motor.c:56:13:SetPhases	24	static
-../Core/Src/motor.c:64:13:CommutateStep	24	static
-../Core/Src/motor.c:72:13:Motor_RunCycle	24	static
-../Core/Src/motor.c:83:6:Motor_Init	16	static
-../Core/Src/motor.c:97:6:Motor_Loop	16	static
+../Core/Src/motor.c:35:13:SetPhases	24	static
+../Core/Src/motor.c:44:17:SineToCCR	24	static
+../Core/Src/motor.c:55:6:Motor_Init	16	static
+../Core/Src/motor.c:67:6:Motor_HoldPosition	40	static
+../Core/Src/motor.c:79:6:Motor_Coast	8	static
+../Core/Src/motor.c:85:6:Motor_SweepTest	16	static
