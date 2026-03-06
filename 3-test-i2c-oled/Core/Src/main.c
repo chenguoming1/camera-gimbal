@@ -23,6 +23,8 @@
 /* USER CODE BEGIN Includes */
 #include "mpu6050.h"
 #include "ssd1306.h"
+#include "ssd1306_tests.h"
+#include "ssd1306_fonts.h"
 #include <math.h>
 /* USER CODE END Includes */
 
@@ -48,6 +50,7 @@ I2C_HandleTypeDef hi2c2;
 /* USER CODE BEGIN PV */
 MPU6050_Data mpuData;
 float pitch;
+static char buf[32];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -61,6 +64,47 @@ static void MX_I2C1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void FormatDistance(float distance, char *buf)
+{
+    int intPart = (int)distance;                  // 123
+    int fracPart = (int)((distance - intPart) * 10); // 0.4 -> 4
+
+    // simple formatting into buf
+    buf[0] = (intPart / 100) % 10 + '0';
+    buf[1] = (intPart / 10) % 10 + '0';
+    buf[2] = intPart % 10 + '0';
+    buf[3] = '.';
+    buf[4] = fracPart % 10 + '0';
+    buf[5] = 0; // null-terminate
+}
+
+void ssd1306_ShowDistance(float dist)
+{
+    //float dist = SR04_GetDistanceCm_IT();  // get result from interrupt logic
+
+    ssd1306_Fill(Black);
+
+    // Title
+    ssd1306_SetCursor(0, 0);
+    ssd1306_WriteString("SR04 Distance", Font_7x10, White);
+
+    ssd1306_SetCursor(0, 16);
+
+    if (dist < 0)
+    {
+        ssd1306_WriteString("Measuring...", Font_11x18, White);
+    }
+    else
+    {
+        // Format text: "123.4 cm"
+//    	ssd1306_WriteString("not measuring ...", Font_11x18, White);
+//        snprintf(buf, sizeof(buf), "%.1f cm", dist);
+        FormatDistance(dist, buf);
+        ssd1306_WriteString(buf, Font_16x26, White);
+    }
+
+    ssd1306_UpdateScreen();
+}
 
 /* USER CODE END 0 */
 
@@ -96,18 +140,21 @@ int main(void)
   MX_I2C2_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
-    MPU6050_Init(&hi2c2);
-    SSD1306_Init(&hi2c1);
-    SSD1306_Clear();
-    SSD1306_DrawString(20, 28, "Initialising...");
-    SSD1306_UpdateDisplay(&hi2c1);
+    MPU6050_Init(&hi2c1);
     HAL_Delay(500);
+    ssd1306_Init();
+    ssd1306_Fill(Black);
+    ssd1306_SetCursor(4, 4);
+    ssd1306_WriteString("Proportional", Font_16x15, White);
+    ssd1306_UpdateScreen();
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -116,9 +163,7 @@ int main(void)
     /* Pitch angle from accelerometer: atan2(AccX, AccZ) in degrees */
     pitch = atan2f((float)mpuData.AccX, (float)mpuData.AccZ) * (180.0f / 3.14159265f);
 
-    SSD1306_Clear();
-    SSD1306_DrawAngle(pitch);
-    SSD1306_UpdateDisplay(&hi2c1);
+    ssd1306_ShowDistance(pitch);
 
     HAL_Delay(100);
   }
@@ -239,6 +284,7 @@ static void MX_I2C2_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -247,6 +293,16 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12|GPIO_PIN_13, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : PB12 PB13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

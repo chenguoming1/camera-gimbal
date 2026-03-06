@@ -3,7 +3,7 @@
 
 #include "main.h"
 
-#define MPU6050_ADDR         0x68
+#define MPU6050_ADDR         0x69//0x68 external mpu
 #define MPU6050_PWR_MGMT_1   0x6B
 #define MPU6050_ACCEL_XOUT_H 0x3B
 #define MPU6050_GYRO_XOUT_H  0x43
