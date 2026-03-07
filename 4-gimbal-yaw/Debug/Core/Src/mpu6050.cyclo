@@ -1,0 +1,7 @@
+../Core/Src/mpu6050.c:10:13:mpu_write	1
+../Core/Src/mpu6050.c:16:16:mpu_read_byte	1
+../Core/Src/mpu6050.c:24:13:mpu_read_burst	1
+../Core/Src/mpu6050.c:33:9:MPU_Init	12
+../Core/Src/mpu6050.c:77:6:MPU_ReadRaw	1
+../Core/Src/mpu6050.c:99:6:MPU_ReadScaled	1
+../Core/Src/mpu6050.c:111:6:MPU_Calibrate	2
