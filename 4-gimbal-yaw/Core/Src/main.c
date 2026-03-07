@@ -58,6 +58,7 @@ TIM_HandleTypeDef htim4;
 
 static MPU_Handle mpu;
 static PID_Handle pid_yaw;
+static MPU_Orientation orientation;
 static float elec_angle = 0.0f;   /* motor electrical angle, 0..360 deg */
 static float yaw_angle  = 0.0f;   /* integrated yaw from gyro, deg      */
 /* USER CODE END PV */
@@ -121,7 +122,7 @@ int main(void)
     /* IMU not found — blink error forever */
     while (1) { HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_12); HAL_Delay(100); }
   }
-  MPU_Calibrate(&mpu, 500);   /* ~1 s, keep board stationary */
+  MPU_Calibrate(&mpu, 2000);   /* ~1 s, keep board stationary */
 
   /* PID for yaw axis */
   PID_Init(&pid_yaw, YAW_KP, YAW_KI, YAW_KD, 30.0f, 90.0f);
@@ -402,6 +403,19 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void MPU_GetOrientation_Fixed(MPU_Handle *mpu, MPU_Data *data, MPU_Orientation *ori, float dt)
+{
+    // Calculate Roll and Pitch from Accelerometer
+    float roll_acc  = atan2f(data->ay, data->az) * 57.29578f;
+    float pitch_acc = atan2f(-data->ax, sqrtf(data->ay * data->ay + data->az * data->az)) * 57.29578f;
+
+    // Filter Constant: At 1kHz, 0.999 provides a stable ~1sec time constant
+    const float alpha = 0.999f;
+
+    // Complementary Filter
+    ori->roll  = alpha * (ori->roll  + data->gx * dt) + (1.0f - alpha) * roll_acc;
+    ori->pitch = alpha * (ori->pitch + data->gy * dt) + (1.0f - alpha) * pitch_acc;
+}
 
 /* ---- helper: sine-wave phase → PWM CCR value ---- */
 static uint32_t sine_to_ccr(float angle_rad, float norm)
@@ -420,28 +434,29 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance != TIM1) return;
 
-    /* 1. Read gyro Z (yaw rate, deg/s) */
+    /* 1. Read all scaled sensor data (Accel + Gyro) */
     MPU_Data d;
     MPU_ReadScaled(&mpu, &d);
 
-    /* 2. Integrate yaw angle */
+    /* 2. Update Pitch and Roll using Complementary Filter */
+    MPU_GetOrientation_Fixed(&mpu, &d, &orientation, CTRL_DT);
+
+    /* 3. Integrate yaw angle (Gyro only, as Accel can't sense Yaw) */
     yaw_angle += d.gz * CTRL_DT;
-    /* Wrap to ±180° */
+
+    /* Wrap yaw to ±180° */
     if (yaw_angle >  180.0f) yaw_angle -= 360.0f;
     if (yaw_angle < -180.0f) yaw_angle += 360.0f;
 
-    /* 3. PID: target = 0 deg (hold heading), measured = yaw_angle */
+    /* 4. PID: target = 0 deg (hold heading), measured = yaw_angle */
     float cmd = PID_Compute(&pid_yaw, 0.0f, yaw_angle, CTRL_DT);
 
-    /* 4. Accumulate electrical angle */
+    /* 5. Accumulate electrical angle for Motor PWM */
     elec_angle += cmd * CTRL_DT;
     if (elec_angle >= 360.0f) elec_angle -= 360.0f;
     if (elec_angle <    0.0f) elec_angle += 360.0f;
 
-    /* 5. Write sinusoidal phases — Mot2 Yaw
-     *    CH_A: TIM4_CH4 (PB9)
-     *    CH_B: TIM2_CH2 (PA1)
-     *    CH_C: TIM4_CH3 (PB8)  */
+    /* 6. Write sinusoidal phases — Mot2 Yaw */
     float norm = MOTOR_STRENGTH / 100.0f;
     float a = DEG2RAD(elec_angle);
     float b = DEG2RAD(elec_angle + 120.0f);
