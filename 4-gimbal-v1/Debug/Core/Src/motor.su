@@ -1,0 +1,5 @@
+../Core/Src/motor.c:22:17:sine_to_ccr	24	static
+../Core/Src/motor.c:33:6:Motor_InitAll	32	static
+../Core/Src/motor.c:79:6:Motor_SetPhase	48	static
+../Core/Src/motor.c:119:6:Motor_Coast	16	static
+../Core/Src/motor.c:125:6:Motor_CoastAll	16	static

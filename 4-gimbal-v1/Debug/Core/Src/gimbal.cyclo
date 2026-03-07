@@ -1,0 +1,4 @@
+../Core/Src/gimbal.c:9:9:Gimbal_Init	2
+../Core/Src/gimbal.c:43:6:Gimbal_Update	8
+../Core/Src/gimbal.c:84:6:Gimbal_SetTarget	1
+../Core/Src/gimbal.c:91:6:Gimbal_Stop	1
