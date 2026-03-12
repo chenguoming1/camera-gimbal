@@ -51,7 +51,7 @@ TIM_HandleTypeDef htim4;
 /* USER CODE BEGIN PV */
 #define PWM_ARR        999      /* must match TIM2/TIM4 Period */
 #define CTRL_DT        0.001f  /* 1 kHz control loop          */
-#define YAW_KP         2.0f
+#define YAW_KP         1.0f
 #define YAW_KI         0.01f
 #define YAW_KD         0.03f
 #define MOTOR_STRENGTH 45.0f   /* 0..100 % */
@@ -122,7 +122,10 @@ int main(void)
     /* IMU not found — blink error forever */
     while (1) { HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_12); HAL_Delay(100); }
   }
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET); // Turn on LED to show calibration
   MPU_Calibrate(&mpu, 2000);   /* ~1 s, keep board stationary */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); // LED off
+
 
   /* PID for yaw axis */
   PID_Init(&pid_yaw, YAW_KP, YAW_KI, YAW_KD, 30.0f, 90.0f);
@@ -440,6 +443,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
     /* 2. Update Pitch and Roll using Complementary Filter */
     MPU_GetOrientation_Fixed(&mpu, &d, &orientation, CTRL_DT);
+
+    /* 2. Gyro Deadband: ignore tiny values that are likely just noise */
+    if (fabsf(d.gz) < 0.05f) d.gz = 0.0f;
 
     /* 3. Integrate yaw angle (Gyro only, as Accel can't sense Yaw) */
     yaw_angle += d.gz * CTRL_DT;
