@@ -1,0 +1,9 @@
+services:
+  brugi-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: brugi-ui
+    ports:
+      - "4173:80"
+    restart: unless-stopped

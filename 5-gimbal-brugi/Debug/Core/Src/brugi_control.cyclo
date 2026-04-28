@@ -1,0 +1,5 @@
+../Core/Src/brugi_control.c:10:14:clampf_local	3
+../Core/Src/brugi_control.c:21:18:motor_axis_from_index	3
+../Core/Src/brugi_control.c:33:13:update_state_machine	7
+../Core/Src/brugi_control.c:74:17:BrugiControl_Init	3
+../Core/Src/brugi_control.c:128:6:BrugiControl_Update	3

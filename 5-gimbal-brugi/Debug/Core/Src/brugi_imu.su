@@ -1,0 +1,6 @@
+../Core/Src/brugi_imu.c:7:13:map_sensor_axes	40	static
+../Core/Src/brugi_imu.c:32:13:map_acc_axes	40	static
+../Core/Src/brugi_imu.c:56:9:BrugiIMU_Init	40	static
+../Core/Src/brugi_imu.c:78:6:BrugiIMU_Calibrate	16	static
+../Core/Src/brugi_imu.c:86:6:BrugiIMU_SetAccTimeConstant	32	static
+../Core/Src/brugi_imu.c:102:6:BrugiIMU_Update	112	static
