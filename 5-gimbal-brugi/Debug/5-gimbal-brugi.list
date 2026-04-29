@@ -733,17 +733,17 @@ void BrugiConfig_LoadDefaults(BrugiConfig *config)
  80008e6:	687b      	ldr	r3, [r7, #4]
  80008e8:	2200      	movs	r2, #0
  80008ea:	f883 202b 	strb.w	r2, [r3, #43]	@ 0x2b
-    config->max_pwm_motor_pitch = 52;
+    config->max_pwm_motor_pitch = 65;
  80008ee:	687b      	ldr	r3, [r7, #4]
- 80008f0:	2234      	movs	r2, #52	@ 0x34
+ 80008f0:	2241      	movs	r2, #65	@ 0x41
  80008f2:	f883 202c 	strb.w	r2, [r3, #44]	@ 0x2c
-    config->max_pwm_motor_roll = 60;
+    config->max_pwm_motor_roll = 70;
  80008f6:	687b      	ldr	r3, [r7, #4]
- 80008f8:	223c      	movs	r2, #60	@ 0x3c
+ 80008f8:	2246      	movs	r2, #70	@ 0x46
  80008fa:	f883 202d 	strb.w	r2, [r3, #45]	@ 0x2d
-    config->max_pwm_motor_yaw_hold = 34;
+    config->max_pwm_motor_yaw_hold = 45;
  80008fe:	687b      	ldr	r3, [r7, #4]
- 8000900:	2222      	movs	r2, #34	@ 0x22
+ 8000900:	222d      	movs	r2, #45	@ 0x2d
  8000902:	f883 202e 	strb.w	r2, [r3, #46]	@ 0x2e
 
     config->enable_gyro = 1;

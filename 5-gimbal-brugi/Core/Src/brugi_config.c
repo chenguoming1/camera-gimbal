@@ -19,9 +19,9 @@ void BrugiConfig_LoadDefaults(BrugiConfig *config)
     config->dir_motor_roll = -1;
     config->motor_number_pitch = 1;
     config->motor_number_roll = 0;
-    config->max_pwm_motor_pitch = 52;
-    config->max_pwm_motor_roll = 60;
-    config->max_pwm_motor_yaw_hold = 34;
+    config->max_pwm_motor_pitch = 65;
+    config->max_pwm_motor_roll = 70;
+    config->max_pwm_motor_yaw_hold = 45;
 
     config->enable_gyro = 1;
     config->enable_acc = 1;
