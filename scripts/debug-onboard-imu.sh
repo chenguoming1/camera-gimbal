@@ -4,15 +4,19 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/debug-onboard-imu.sh probe|verify
+Usage: scripts/debug-onboard-imu.sh probe|verify|motor
 
   probe   Attach to the existing IMU-test firmware; read WHO_AM_I at 0x68/0x69
           on I2C1/I2C2, then resume. Does not flash or reset the sensor.
           Disconnect the board's USB data cable first; leave ST-LINK connected.
   verify  Build, flash and verify 6storm32-test, reset, check live IMU samples
           for 5 seconds, then resume and detach.
+  motor   Check the current MOT0-only hold registers and inactive motor GPIOs,
+          then stop the hold and detach. Does not flash. Motor power must be off.
 
-Both modes briefly halt the MCU. Keep the board powered throughout the test.
+All modes briefly halt the MCU. Disconnect motor power before using any mode;
+keep MCU/ST-LINK power connected. Verify inhibits automatic motor startup, and
+probe requests a motor stop before resuming. Resetting later re-enables startup.
 Probe requires this project's current ELF to match the firmware already flashed.
 
 Optional environment variables:
@@ -27,7 +31,7 @@ EOF
 
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
-  probe|verify) mode=$1 ;;
+  probe|verify|motor) mode=$1 ;;
   *) usage >&2; exit 2 ;;
 esac
 [[ $# -eq 1 ]] || { usage >&2; exit 2; }
@@ -134,7 +138,7 @@ else:
 PY
 
 cd "$repo_root"
-if [[ "$mode" == probe ]]; then
+if [[ "$mode" != verify ]]; then
   # Compare before calling target functions: stale symbols can call wrong code.
   # Read bytes directly; avoid relying on the debug server's remote CRC support.
   python3 - "$elf" "$log_dir" <<'PY'
@@ -186,6 +190,10 @@ for name in ('.isr_vector', '.text', '.rodata'):
     print(f'{name}: matched ({len(actual)} bytes).')
 PY
 fi
+gdb_script="$repo_root/scripts/imu-debug.gdb"
+if [[ "$mode" == motor ]]; then
+  gdb_script="$repo_root/scripts/motor-hold-debug.gdb"
+fi
 "$gdb" --quiet --batch "$elf" \
   -ex 'set pagination off' \
   -ex 'set confirm off' \
@@ -193,5 +201,5 @@ fi
   -ex "set \$imu_probe_mode = $probe_mode" \
   -ex "set \$imu_verify_seconds = $verify_seconds" \
   -ex "target remote 127.0.0.1:$gdb_port" \
-  -x "$repo_root/scripts/imu-debug.gdb" 2>&1 | tee "$log_dir/gdb.log"
+  -x "$gdb_script" 2>&1 | tee "$log_dir/gdb.log"
 echo "Finished; logs: $log_dir"

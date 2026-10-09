@@ -44,6 +44,8 @@ end
 
 if $imu_probe_mode
   # Current matching firmware is required; see the wrapper's preflight check.
+  # Cancel a pending/running motor sequence before resuming for IMU diagnostics.
+  set variable motor_test.request_stop = 1
   imu_wait_report
   if hUsbDeviceFS.dev_state == 3
     echo Unplug board USB data before probing; keep ST-LINK and power connected.\n
@@ -61,6 +63,11 @@ if $imu_probe_mode
 else
   load
   monitor reset
+  # Inhibit the motor's automatic startup before its two-second delay expires.
+  tbreak Motor_TestInit
+  continue
+  finish
+  set variable motor_test.request_stop = 1
   imu_wait_report
   echo \nFirst live snapshot\n
   print imu_test

@@ -70,6 +70,7 @@ extern DMA_HandleTypeDef hdma_adc1;
 void NMI_Handler(void)
 {
   /* USER CODE BEGIN NonMaskableInt_IRQn 0 */
+  Motor_TestEmergencyStop();
 
   /* USER CODE END NonMaskableInt_IRQn 0 */
   /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
@@ -85,6 +86,7 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
+  Motor_TestEmergencyStop();
 
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
@@ -100,6 +102,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
+  Motor_TestEmergencyStop();
 
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
@@ -115,6 +118,7 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
+  Motor_TestEmergencyStop();
 
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
@@ -130,6 +134,7 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
+  Motor_TestEmergencyStop();
 
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
@@ -188,6 +193,7 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
+  Motor_TestTick();
 
   /* USER CODE END SysTick_IRQn 1 */
 }

@@ -59,6 +59,38 @@ typedef struct
   int32_t gyro_mdps[3];
   int32_t temperature_centi_c;
 } IMU_TestStatus;
+/* Fixed-field component test for MOT0 only; visible in Live Expressions. */
+typedef enum
+{
+  MOTOR_STARTUP_DELAY = 0,
+  MOTOR_RAMP,
+  MOTOR_HOLD,
+  MOTOR_STOPPED,
+  MOTOR_FAULT
+} Motor_TestState;
+
+typedef enum
+{
+  MOTOR_STOP_NONE = 0,
+  MOTOR_STOP_BUTTON,
+  MOTOR_STOP_COMMAND,
+  MOTOR_STOP_TIMER,
+  MOTOR_STOP_FAULT
+} Motor_StopReason;
+
+typedef struct
+{
+  Motor_TestState state;
+  Motor_StopReason stop_reason;
+  uint8_t request_stop; /* Set to 1 while running, or set then Resume. */
+  uint8_t request_run;  /* Set to 1 to rerun after a stop with PC3 released. */
+  uint32_t runs;
+  uint32_t elapsed_ms;
+  uint16_t drive_permille; /* Differential PWM span; 400 = legacy 40% strength. */
+  uint16_t compare[3]; /* PA7/PB0/PB1 = TIM3 CH2/CH3/CH4. */
+  uint32_t timer_cr1;
+  uint32_t timer_ccer;
+} Motor_TestStatus;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -94,6 +126,17 @@ typedef struct
 #define IMU_SAMPLE_INTERVAL_MS 20U
 #define IMU_REPORT_INTERVAL_MS 250U
 #define IMU_RETRY_INTERVAL_MS 1000U
+/* MOT0 only: PA7/PB0/PB1. Match the existing 2-DRV8313-test 40% strength.
+ * DRV8313 receives centered 3-PWM; ENx/nSLEEP/nRESET must be high in hardware.
+ * Strength is a differential duty span, not a current/torque percentage.
+ */
+#define MOTOR_HOLD_DRIVE_PERMILLE 400U
+#define MOTOR_STARTUP_DELAY_MS 2000U
+#define MOTOR_RAMP_MS 1000U
+#define MOTOR_OUTPUT_ENABLE_MASK (TIM_CCER_CC2E | TIM_CCER_CC3E | TIM_CCER_CC4E)
+#if MOTOR_HOLD_DRIVE_PERMILLE > 400U
+#error "Do not exceed the existing 40 percent one-motor test strength."
+#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -122,7 +165,11 @@ static uint32_t imu_last_report_ms;
 static uint32_t imu_last_retry_ms;
 static uint32_t imu_last_led_ms;
 /* USB retains this buffer until transmission completes; never use a stack buffer. */
-static char imu_usb_line[256];
+static char imu_usb_line[384];
+volatile Motor_TestStatus motor_test;
+static volatile uint8_t motor_initialized;
+static uint32_t motor_boot_ms;
+static uint32_t motor_started_ms;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -139,10 +186,179 @@ static void MX_TIM4_Init(void);
 static uint8_t IMU_TestInit(void);
 static uint8_t IMU_TestRead(void);
 static void IMU_TestReport(void);
+static void Motor_TestInit(void);
+static void Motor_SetHold(uint16_t strength);
+static void Motor_Stop(Motor_StopReason reason);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/* With DRV8313 ENx high, all INx low is braking, not static position hold. */
+static void Motor_ZeroOutputs(void)
+{
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0U);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 0U);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0U);
+  for (uint32_t i = 0U; i < 3U; i++)
+  {
+    motor_test.compare[i] = 0U;
+  }
+  motor_test.drive_permille = 0U;
+  /* Apply zero even if a fault stopped the counter with preloads pending. */
+  htim3.Instance->EGR = TIM_EGR_UG;
+}
+
+static void Motor_Stop(Motor_StopReason reason)
+{
+  Motor_ZeroOutputs();
+  motor_test.stop_reason = reason;
+  motor_test.request_stop = 0U;
+  motor_test.request_run = 0U;
+  motor_test.state = MOTOR_STOPPED;
+}
+
+void Motor_TestEmergencyStop(void)
+{
+  if (!motor_initialized)
+  {
+    return;
+  }
+  Motor_Stop(MOTOR_STOP_FAULT);
+  motor_test.state = MOTOR_FAULT;
+}
+
+static void Motor_TestInit(void)
+{
+  GPIO_InitTypeDef inactive = {0};
+
+  /* Keep MOT1/MOT2 inputs low as ordinary GPIOs; no split-timer drive. */
+  htim2.Instance->CR1 &= ~TIM_CR1_CEN;
+  htim4.Instance->CR1 &= ~TIM_CR1_CEN;
+  htim2.Instance->CCER = 0U;
+  htim4.Instance->CCER = 0U;
+  htim3.Instance->CCER = 0U;
+  htim3.Instance->SMCR = 0U; /* Independent TIM3; no master-trigger dependency. */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_6, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8 | GPIO_PIN_9, GPIO_PIN_RESET);
+  inactive.Mode = GPIO_MODE_OUTPUT_PP;
+  inactive.Pull = GPIO_NOPULL;
+  inactive.Speed = GPIO_SPEED_FREQ_LOW;
+  inactive.Pin = GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_6;
+  HAL_GPIO_Init(GPIOA, &inactive);
+  inactive.Pin = GPIO_PIN_8 | GPIO_PIN_9;
+  HAL_GPIO_Init(GPIOB, &inactive);
+
+  Motor_ZeroOutputs();
+  if (__HAL_TIM_GET_AUTORELOAD(&htim3) != 3599U || htim3.Instance->PSC != 0U ||
+      HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2) != HAL_OK ||
+      HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3) != HAL_OK ||
+      HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Motor_Stop(MOTOR_STOP_TIMER);
+    motor_test.state = MOTOR_FAULT;
+    return;
+  }
+  motor_test.timer_cr1 = htim3.Instance->CR1;
+  motor_test.timer_ccer = htim3.Instance->CCER;
+  motor_boot_ms = HAL_GetTick();
+  motor_test.state = MOTOR_STARTUP_DELAY;
+  motor_initialized = 1U;
+}
+
+static void Motor_SetHold(uint16_t strength)
+{
+  if (strength > MOTOR_HOLD_DRIVE_PERMILLE)
+  {
+    strength = MOTOR_HOLD_DRIVE_PERMILLE;
+  }
+  uint32_t period = __HAL_TIM_GET_AUTORELOAD(&htim3) + 1U;
+  uint16_t center = (uint16_t)(period / 2U);
+  uint32_t span = period * strength / 1000U;
+  /* Fixed electrical angle: sin(0), sin(120), sin(240).
+   * Centered modulation has the same average line-to-line command as the old
+   * (sin+1)/2 * 40% waveform, with longer DRV8313 input pulse widths.
+   */
+  uint16_t offset = (uint16_t)(28378U * span / 65534U);
+  uint16_t compare[3] = { center, (uint16_t)(center + offset), (uint16_t)(center - offset) };
+  for (uint32_t i = 0U; i < 3U; i++)
+  {
+    motor_test.compare[i] = compare[i];
+  }
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, compare[0]);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, compare[1]);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, compare[2]);
+  motor_test.drive_permille = strength;
+}
+
+static void Motor_Start(uint32_t now)
+{
+  motor_started_ms = now;
+  motor_test.elapsed_ms = 0U;
+  motor_test.runs++;
+  motor_test.stop_reason = MOTOR_STOP_NONE;
+  motor_test.state = MOTOR_RAMP;
+}
+
+/* SysTick supplies a 1 ms ramp and stop check without blocking I2C/USB. */
+void Motor_TestTick(void)
+{
+  if (!motor_initialized || motor_test.state == MOTOR_FAULT)
+  {
+    return;
+  }
+  uint32_t now = HAL_GetTick();
+  motor_test.timer_cr1 = htim3.Instance->CR1;
+  motor_test.timer_ccer = htim3.Instance->CCER;
+  if (motor_test.request_stop)
+  {
+    Motor_Stop(MOTOR_STOP_COMMAND);
+    return;
+  }
+  if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_3) == GPIO_PIN_RESET)
+  {
+    Motor_Stop(MOTOR_STOP_BUTTON);
+    return;
+  }
+  if ((motor_test.timer_cr1 & TIM_CR1_CEN) == 0U ||
+      (motor_test.timer_ccer & MOTOR_OUTPUT_ENABLE_MASK) != MOTOR_OUTPUT_ENABLE_MASK)
+  {
+    Motor_Stop(MOTOR_STOP_TIMER);
+    motor_test.state = MOTOR_FAULT;
+    return;
+  }
+  if (motor_test.request_run)
+  {
+    motor_test.request_run = 0U;
+    if (motor_test.state == MOTOR_STOPPED)
+    {
+      Motor_Start(now);
+    }
+  }
+  if (motor_test.state == MOTOR_STARTUP_DELAY)
+  {
+    if ((uint32_t)(now - motor_boot_ms) >= MOTOR_STARTUP_DELAY_MS)
+    {
+      Motor_Start(now);
+    }
+    return;
+  }
+  if (motor_test.state == MOTOR_RAMP || motor_test.state == MOTOR_HOLD)
+  {
+    uint32_t elapsed = (uint32_t)(now - motor_started_ms);
+    motor_test.elapsed_ms = elapsed;
+    uint16_t strength = MOTOR_HOLD_DRIVE_PERMILLE;
+    if (motor_test.state == MOTOR_HOLD || elapsed >= MOTOR_RAMP_MS)
+    {
+      motor_test.state = MOTOR_HOLD;
+    }
+    else
+    {
+      strength = (uint16_t)(MOTOR_HOLD_DRIVE_PERMILLE * elapsed / MOTOR_RAMP_MS);
+    }
+    Motor_SetHold(strength);
+  }
+}
+
 /* Record failed HAL transactions without treating old samples as fresh data. */
 static uint8_t IMU_CheckTransfer(HAL_StatusTypeDef status)
 {
@@ -281,7 +497,7 @@ static void IMU_TestReport(void)
   {
     length = snprintf(imu_usb_line, sizeof(imu_usb_line),
         "IMU OK bus=I2C%u addr=0x%02X id=0x%02X n=%lu accel_mg=[%ld,%ld,%ld] "
-        "gyro_mdps=[%ld,%ld,%ld] temp_centiC=%ld errors=%lu\r\n",
+        "gyro_mdps=[%ld,%ld,%ld] temp_centiC=%ld errors=%lu",
         (unsigned int)imu_test.i2c_bus, (unsigned int)imu_test.i2c_address,
         (unsigned int)imu_test.who_am_i, (unsigned long)imu_test.samples,
         (long)imu_test.accel_mg[0], (long)imu_test.accel_mg[1], (long)imu_test.accel_mg[2],
@@ -291,7 +507,7 @@ static void IMU_TestReport(void)
   else
   {
     length = snprintf(imu_usb_line, sizeof(imu_usb_line),
-        "IMU ERROR bus=I2C%u addr=0x%02X state=%u id=0x%02X hal=%u i2c=0x%08lX errors=%lu\r\n",
+        "IMU ERROR bus=I2C%u addr=0x%02X state=%u id=0x%02X hal=%u i2c=0x%08lX errors=%lu",
         (unsigned int)imu_test.i2c_bus, (unsigned int)imu_test.i2c_address,
         (unsigned int)imu_test.state, (unsigned int)imu_test.who_am_i,
         (unsigned int)imu_test.last_hal_status, (unsigned long)imu_test.last_i2c_error,
@@ -301,6 +517,17 @@ static void IMU_TestReport(void)
   {
     return;
   }
+
+  int tail = snprintf(&imu_usb_line[length], sizeof(imu_usb_line) - (size_t)length,
+      " motor=0 motor_state=%u motor_stop=%u motor_run=%lu motor_ms=%lu drive_permille=%u\r\n",
+      (unsigned int)motor_test.state, (unsigned int)motor_test.stop_reason,
+      (unsigned long)motor_test.runs, (unsigned long)motor_test.elapsed_ms,
+      (unsigned int)motor_test.drive_permille);
+  if (tail <= 0 || (size_t)tail >= sizeof(imu_usb_line) - (size_t)length)
+  {
+    return;
+  }
+  length += tail;
 
   /* Recheck after formatting, then submit while USB IRQs cannot invalidate cdc.
    * Interrupts are masked only for the checks/submission, not for formatting.
@@ -358,6 +585,7 @@ int main(void)
   /* PB5 stays low during startup to force USB disconnect before enumeration. */
   HAL_Delay(100U);
   imu_initialized = IMU_TestInit();
+  Motor_TestInit();
   /* PB5 is open drain: high releases the USB D+ pull-up control. */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
   imu_last_sample_ms = HAL_GetTick();
@@ -397,11 +625,11 @@ int main(void)
       }
     }
 
-    /* Red = failed identity/configuration/read. Green heartbeat = reads succeed.
+    /* Red = IMU failure or motor fault. Green heartbeat = IMU reads succeed.
      * LEDs indicate communication status; inspect motion values to test sensing.
      */
     HAL_GPIO_WritePin(LED_PORT, LED_RED_PIN,
-                     imu_initialized ? GPIO_PIN_RESET : GPIO_PIN_SET);
+                     (imu_initialized && motor_test.state != MOTOR_FAULT) ? GPIO_PIN_RESET : GPIO_PIN_SET);
     if (!imu_initialized)
     {
       HAL_GPIO_WritePin(LED_PORT, LED_GREEN_PIN, GPIO_PIN_RESET);
@@ -855,6 +1083,7 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  Motor_TestEmergencyStop();
   __disable_irq();
   while (1)
   {
