@@ -32,9 +32,14 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/* STorM32 v1.30 onboard LED connections.
+ * MX_GPIO_Init() configures PB12 and PB13 as push-pull outputs, initially low.
+ * Both LEDs are active high: GPIO_PIN_SET turns on; GPIO_PIN_RESET turns off.
+ */
 #define LED_GREEN_PIN GPIO_PIN_12
 #define LED_RED_PIN GPIO_PIN_13
 #define LED_PORT GPIOB
+/* Each LED stays on for 500 ms; a complete green/red cycle takes 1 second. */
 #define LED_TEST_INTERVAL_MS 500U
 /* USER CODE END PD */
 
@@ -125,11 +130,17 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* STorM32 v1.30 onboard LEDs are active high. */
+    /* LED component test: alternate green and red continuously.
+     * HAL_Delay() blocks the main loop while SysTick interrupts track the delay.
+     * This simple timing is intended for testing; use nonblocking timing when
+     * adding gimbal control or other work that must run in the main loop.
+     */
+    /* First half of the cycle: green on, red off. */
     HAL_GPIO_WritePin(LED_PORT, LED_GREEN_PIN, GPIO_PIN_SET);
     HAL_GPIO_WritePin(LED_PORT, LED_RED_PIN, GPIO_PIN_RESET);
     HAL_Delay(LED_TEST_INTERVAL_MS);
 
+    /* Second half of the cycle: green off, red on. */
     HAL_GPIO_WritePin(LED_PORT, LED_GREEN_PIN, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(LED_PORT, LED_RED_PIN, GPIO_PIN_SET);
     HAL_Delay(LED_TEST_INTERVAL_MS);
