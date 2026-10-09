@@ -22,25 +22,78 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "usbd_cdc_if.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+typedef enum
+{
+  IMU_TEST_STARTING = 0,
+  IMU_TEST_OK,
+  IMU_TEST_I2C_ERROR,
+  IMU_TEST_WRONG_ID,
+  IMU_TEST_CONFIG_ERROR
+} IMU_TestState;
 
+/* Watch imu_test in CubeIDE Live Expressions, even without USB connected.
+ * Raw values are signed sensor counts. Scaled units are included in the names.
+ * A sample is valid only while state == IMU_TEST_OK; errors retain the last data.
+ */
+typedef struct
+{
+  IMU_TestState state;
+  uint8_t who_am_i;
+  uint8_t i2c_bus;
+  uint8_t i2c_address;
+  HAL_StatusTypeDef last_hal_status;
+  uint32_t last_i2c_error;
+  uint32_t samples;
+  uint32_t errors;
+  uint32_t last_sample_ms;
+  int16_t accel_raw[3];
+  int16_t gyro_raw[3];
+  int16_t temperature_raw;
+  int32_t accel_mg[3];
+  int32_t gyro_mdps[3];
+  int32_t temperature_centi_c;
+} IMU_TestStatus;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* STorM32 v1.30 onboard LED connections.
- * MX_GPIO_Init() configures PB12 and PB13 as push-pull outputs, initially low.
- * Both LEDs are active high: GPIO_PIN_SET turns on; GPIO_PIN_RESET turns off.
+/* STorM32 v1.30 onboard LEDs: high = on, low = off.
+ * MX_GPIO_Init() configures PB12/PB13 as push-pull outputs, initially low.
  */
 #define LED_GREEN_PIN GPIO_PIN_12
 #define LED_RED_PIN GPIO_PIN_13
 #define LED_PORT GPIOB
-/* Each LED stays on for 500 ms; a complete green/red cycle takes 1 second. */
-#define LED_TEST_INTERVAL_MS 500U
+#define IMU_LED_INTERVAL_MS 250U
+
+/* Measured on the connected board with the external IMU unplugged:
+ * onboard MPU6050 = I2C1 PB6=SCL, PB7=SDA, address 0x69.
+ * This differs from the reference v1.30 schematic (I2C2, address 0x68).
+ * STM32 HAL expects the 7-bit device address shifted left by one.
+ * WHO_AM_I remains 0x68 even when the device address is 0x69.
+ * Register definitions: TDK RM-MPU-6000A-00, revision 4.2.
+ */
+#define IMU_I2C_HANDLE hi2c1
+#define MPU6050_ADDRESS_7BIT 0x69U
+#define MPU6050_ADDRESS (MPU6050_ADDRESS_7BIT << 1)
+#define MPU6050_WHO_AM_I 0x75U
+#define MPU6050_EXPECTED_ID 0x68U
+#define MPU6050_PWR_MGMT_1 0x6BU
+#define MPU6050_PWR_MGMT_2 0x6CU
+#define MPU6050_SMPLRT_DIV 0x19U
+#define MPU6050_CONFIG 0x1AU
+#define MPU6050_GYRO_CONFIG 0x1BU
+#define MPU6050_ACCEL_CONFIG 0x1CU
+#define MPU6050_ACCEL_XOUT_H 0x3BU
+#define IMU_I2C_TIMEOUT_MS 50U
+#define IMU_SAMPLE_INTERVAL_MS 20U
+#define IMU_REPORT_INTERVAL_MS 250U
+#define IMU_RETRY_INTERVAL_MS 1000U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -60,7 +113,16 @@ TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
 
 /* USER CODE BEGIN PV */
-
+/* Volatile keeps the live diagnostic values visible to the debugger. */
+volatile IMU_TestStatus imu_test;
+extern USBD_HandleTypeDef hUsbDeviceFS;
+static uint8_t imu_initialized;
+static uint32_t imu_last_sample_ms;
+static uint32_t imu_last_report_ms;
+static uint32_t imu_last_retry_ms;
+static uint32_t imu_last_led_ms;
+/* USB retains this buffer until transmission completes; never use a stack buffer. */
+static char imu_usb_line[256];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -74,12 +136,185 @@ static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
-
+static uint8_t IMU_TestInit(void);
+static uint8_t IMU_TestRead(void);
+static void IMU_TestReport(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/* Record failed HAL transactions without treating old samples as fresh data. */
+static uint8_t IMU_CheckTransfer(HAL_StatusTypeDef status)
+{
+  imu_test.last_hal_status = status;
+  imu_test.last_i2c_error = HAL_I2C_GetError(&IMU_I2C_HANDLE);
+  if (status != HAL_OK)
+  {
+    imu_test.state = IMU_TEST_I2C_ERROR;
+    imu_test.errors++;
+    return 0U;
+  }
+  return 1U;
+}
 
+static uint8_t IMU_ReadRegisters(uint8_t reg, uint8_t *data, uint16_t length)
+{
+  return IMU_CheckTransfer(HAL_I2C_Mem_Read(&IMU_I2C_HANDLE, MPU6050_ADDRESS, reg,
+      I2C_MEMADD_SIZE_8BIT, data, length, IMU_I2C_TIMEOUT_MS));
+}
+
+static uint8_t IMU_WriteRegister(uint8_t reg, uint8_t value)
+{
+  return IMU_CheckTransfer(HAL_I2C_Mem_Write(&IMU_I2C_HANDLE, MPU6050_ADDRESS, reg,
+      I2C_MEMADD_SIZE_8BIT, &value, 1U, IMU_I2C_TIMEOUT_MS));
+}
+
+static uint8_t IMU_TestInit(void)
+{
+  uint8_t identity = 0U;
+  /* Reset before configuring so this test does not inherit an earlier setup. */
+  static const uint8_t settings[][2] =
+  {
+    {MPU6050_PWR_MGMT_1, 0x01U}, /* Wake, temperature enabled, X-gyro PLL clock. */
+    {MPU6050_PWR_MGMT_2, 0x00U}, /* Enable all accelerometer and gyro axes. */
+    {MPU6050_SMPLRT_DIV, 19U},   /* 1 kHz / (1 + 19) = 50 Hz with DLPF enabled. */
+    {MPU6050_CONFIG, 0x03U},     /* DLPF: accel 44 Hz, gyro 42 Hz. */
+    {MPU6050_GYRO_CONFIG, 0x00U},/* +/-250 deg/s: 131 counts per deg/s. */
+    {MPU6050_ACCEL_CONFIG, 0x00U}/* +/-2 g: 16384 counts per g. */
+  };
+
+  imu_test.i2c_bus = (IMU_I2C_HANDLE.Instance == I2C1) ? 1U : 2U;
+  imu_test.i2c_address = MPU6050_ADDRESS_7BIT;
+  imu_test.who_am_i = 0U;
+  if (!IMU_ReadRegisters(MPU6050_WHO_AM_I, &identity, 1U))
+  {
+    return 0U;
+  }
+  imu_test.who_am_i = identity;
+  if (identity != MPU6050_EXPECTED_ID)
+  {
+    imu_test.state = IMU_TEST_WRONG_ID;
+    imu_test.errors++;
+    return 0U;
+  }
+  if (!IMU_WriteRegister(MPU6050_PWR_MGMT_1, 0x80U))
+  {
+    return 0U;
+  }
+  HAL_Delay(100U); /* Device reset settling time. */
+
+  for (uint32_t i = 0U; i < sizeof(settings) / sizeof(settings[0]); i++)
+  {
+    uint8_t actual = 0U;
+    if (!IMU_WriteRegister(settings[i][0], settings[i][1]))
+    {
+      return 0U;
+    }
+    if (settings[i][0] == MPU6050_PWR_MGMT_1)
+    {
+      HAL_Delay(100U); /* Allow the gyro and PLL to settle after waking. */
+    }
+    if (!IMU_ReadRegisters(settings[i][0], &actual, 1U))
+    {
+      return 0U;
+    }
+    if (actual != settings[i][1])
+    {
+      imu_test.state = IMU_TEST_CONFIG_ERROR;
+      imu_test.errors++;
+      return 0U;
+    }
+  }
+
+  /* Confirm a full sample can be read before indicating success. */
+  return IMU_TestRead();
+}
+
+static int16_t IMU_DecodeSigned(const uint8_t *bytes)
+{
+  return (int16_t)(((uint16_t)bytes[0] << 8) | bytes[1]);
+}
+
+static uint8_t IMU_TestRead(void)
+{
+  uint8_t data[14];
+  /* A single burst keeps accel, temperature, and gyro from the same sample. */
+  if (!IMU_ReadRegisters(MPU6050_ACCEL_XOUT_H, data, sizeof(data)))
+  {
+    return 0U;
+  }
+  for (uint32_t axis = 0U; axis < 3U; axis++)
+  {
+    imu_test.accel_raw[axis] = IMU_DecodeSigned(&data[axis * 2U]);
+    imu_test.gyro_raw[axis] = IMU_DecodeSigned(&data[8U + axis * 2U]);
+    /* Integer output avoids needing floating-point printf support. */
+    imu_test.accel_mg[axis] = (int32_t)imu_test.accel_raw[axis] * 1000 / 16384;
+    imu_test.gyro_mdps[axis] = (int32_t)imu_test.gyro_raw[axis] * 1000 / 131;
+  }
+  imu_test.temperature_raw = IMU_DecodeSigned(&data[6]);
+  imu_test.temperature_centi_c = (int32_t)imu_test.temperature_raw * 100 / 340 + 3653;
+  imu_test.last_sample_ms = HAL_GetTick();
+  imu_test.samples++;
+  imu_test.state = IMU_TEST_OK;
+  return 1U;
+}
+
+static void IMU_TestReport(void)
+{
+  /* Skip reports if USB is absent or busy, keeping sampling independent of it.
+   * Guard class-data access because USB reset/disconnect can free it in an IRQ.
+   * This function is the only CDC sender; do not overwrite an in-flight buffer.
+   */
+  uint32_t irq_mask = __get_PRIMASK();
+  __disable_irq();
+  USBD_CDC_HandleTypeDef *cdc = hUsbDeviceFS.pClassData;
+  uint8_t ready = (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
+                  cdc != NULL && cdc->TxState == 0U);
+  __set_PRIMASK(irq_mask);
+  if (!ready)
+  {
+    return;
+  }
+
+  int length;
+  if (imu_test.state == IMU_TEST_OK)
+  {
+    length = snprintf(imu_usb_line, sizeof(imu_usb_line),
+        "IMU OK bus=I2C%u addr=0x%02X id=0x%02X n=%lu accel_mg=[%ld,%ld,%ld] "
+        "gyro_mdps=[%ld,%ld,%ld] temp_centiC=%ld errors=%lu\r\n",
+        (unsigned int)imu_test.i2c_bus, (unsigned int)imu_test.i2c_address,
+        (unsigned int)imu_test.who_am_i, (unsigned long)imu_test.samples,
+        (long)imu_test.accel_mg[0], (long)imu_test.accel_mg[1], (long)imu_test.accel_mg[2],
+        (long)imu_test.gyro_mdps[0], (long)imu_test.gyro_mdps[1], (long)imu_test.gyro_mdps[2],
+        (long)imu_test.temperature_centi_c, (unsigned long)imu_test.errors);
+  }
+  else
+  {
+    length = snprintf(imu_usb_line, sizeof(imu_usb_line),
+        "IMU ERROR bus=I2C%u addr=0x%02X state=%u id=0x%02X hal=%u i2c=0x%08lX errors=%lu\r\n",
+        (unsigned int)imu_test.i2c_bus, (unsigned int)imu_test.i2c_address,
+        (unsigned int)imu_test.state, (unsigned int)imu_test.who_am_i,
+        (unsigned int)imu_test.last_hal_status, (unsigned long)imu_test.last_i2c_error,
+        (unsigned long)imu_test.errors);
+  }
+  if (length <= 0 || (size_t)length >= sizeof(imu_usb_line))
+  {
+    return;
+  }
+
+  /* Recheck after formatting, then submit while USB IRQs cannot invalidate cdc.
+   * Interrupts are masked only for the checks/submission, not for formatting.
+   */
+  irq_mask = __get_PRIMASK();
+  __disable_irq();
+  cdc = hUsbDeviceFS.pClassData;
+  if (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
+      cdc != NULL && cdc->TxState == 0U)
+  {
+    (void)CDC_Transmit_FS((uint8_t *)imu_usb_line, (uint16_t)length);
+  }
+  __set_PRIMASK(irq_mask);
+}
 /* USER CODE END 0 */
 
 /**
@@ -120,7 +355,15 @@ int main(void)
   MX_TIM4_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
-
+  /* PB5 stays low during startup to force USB disconnect before enumeration. */
+  HAL_Delay(100U);
+  imu_initialized = IMU_TestInit();
+  /* PB5 is open drain: high releases the USB D+ pull-up control. */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
+  imu_last_sample_ms = HAL_GetTick();
+  imu_last_retry_ms = imu_last_sample_ms;
+  imu_last_report_ms = imu_last_sample_ms;
+  imu_last_led_ms = imu_last_sample_ms;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -130,20 +373,50 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* LED component test: alternate green and red continuously.
-     * HAL_Delay() blocks the main loop while SysTick interrupts track the delay.
-     * This simple timing is intended for testing; use nonblocking timing when
-     * adding gimbal control or other work that must run in the main loop.
-     */
-    /* First half of the cycle: green on, red off. */
-    HAL_GPIO_WritePin(LED_PORT, LED_GREEN_PIN, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(LED_PORT, LED_RED_PIN, GPIO_PIN_RESET);
-    HAL_Delay(LED_TEST_INTERVAL_MS);
+    uint32_t now = HAL_GetTick();
 
-    /* Second half of the cycle: green off, red on. */
-    HAL_GPIO_WritePin(LED_PORT, LED_GREEN_PIN, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(LED_PORT, LED_RED_PIN, GPIO_PIN_SET);
-    HAL_Delay(LED_TEST_INTERVAL_MS);
+    if (!imu_initialized)
+    {
+      /* Retry initialization once per second; never halt on a sensor failure. */
+      if ((uint32_t)(now - imu_last_retry_ms) >= IMU_RETRY_INTERVAL_MS)
+      {
+        imu_initialized = IMU_TestInit();
+        now = HAL_GetTick();
+        imu_last_retry_ms = now;
+        imu_last_sample_ms = now;
+      }
+    }
+    else if ((uint32_t)(now - imu_last_sample_ms) >= IMU_SAMPLE_INTERVAL_MS)
+    {
+      imu_initialized = IMU_TestRead();
+      now = HAL_GetTick();
+      imu_last_sample_ms = now;
+      if (!imu_initialized)
+      {
+        imu_last_retry_ms = now;
+      }
+    }
+
+    /* Red = failed identity/configuration/read. Green heartbeat = reads succeed.
+     * LEDs indicate communication status; inspect motion values to test sensing.
+     */
+    HAL_GPIO_WritePin(LED_PORT, LED_RED_PIN,
+                     imu_initialized ? GPIO_PIN_RESET : GPIO_PIN_SET);
+    if (!imu_initialized)
+    {
+      HAL_GPIO_WritePin(LED_PORT, LED_GREEN_PIN, GPIO_PIN_RESET);
+    }
+    else if ((uint32_t)(now - imu_last_led_ms) >= IMU_LED_INTERVAL_MS)
+    {
+      HAL_GPIO_TogglePin(LED_PORT, LED_GREEN_PIN);
+      imu_last_led_ms = now;
+    }
+
+    if ((uint32_t)(now - imu_last_report_ms) >= IMU_REPORT_INTERVAL_MS)
+    {
+      imu_last_report_ms = now;
+      IMU_TestReport();
+    }
   }
   /* USER CODE END 3 */
 }
