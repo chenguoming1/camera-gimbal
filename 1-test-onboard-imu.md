@@ -151,6 +151,114 @@ and [product specification](https://invensense.tdk.com/wp-content/uploads/2015/0
 The local STorM32 v1.30 schematic sheets are in `storm32/`; their IMU bus/address
 mapping differs from the connected board, as described above.
 
+### Debug process — 2026-10-09
+
+1. **Check the connection and build.** STM32CubeProgrammer detected STLINK-V3SET.
+   The project built successfully with CubeIDE's bundled ARM toolchain. The only
+   USB serial device detected belonged to ST-LINK, so the investigation used SWD
+   and GDB rather than the board's USB CDC output.
+2. **Flash and inspect startup.** Start ST-LINK GDB server in SWD mode, connect
+   GDB with `Debug/6storm32-test.elf`, load/verify the firmware, reset, and stop
+   after IMU initialization. Set a breakpoint in `Error_Handler()` to catch a
+   peripheral initialization failure. Inspect `imu_test` and `imu_initialized`.
+3. **Identify the initial failure.** The original schematic-based test used I2C2
+   at `0x68`. Live status showed `IMU_TEST_I2C_ERROR`, `HAL_ERROR`, I²C error
+   `0x04` (acknowledge failure), and zero successful samples. Repeated attempts
+   produced the same result; the main loop was running, but the device did not
+   acknowledge that address on that bus.
+4. **Probe both buses and addresses.** Call `HAL_I2C_Mem_Read()` from GDB to read
+   register `0x75` (`WHO_AM_I`) at `0x68` and `0x69` on each I²C handle. Pass the
+   address shifted left once. Read the identity only after `HAL_OK`; a failed
+   transaction leaves the destination byte unchanged. The unused
+   `HAL_I2C_IsDeviceReady()` function was not linked into this firmware, so direct
+   register reads were used instead.
+5. **Separate onboard from external.** Initially both addresses answered on
+   I2C1. The user unplugged the external IMU, and the same checks were repeated:
+
+   | Bus | Address | External connected | External unplugged |
+   | --- | --- | --- | --- |
+   | I2C1 | `0x68` | `HAL_OK`, identity `0x68` | Acknowledge failure |
+   | I2C1 | `0x69` | `HAL_OK`, identity `0x68` | `HAL_OK`, identity `0x68` |
+   | I2C2 | `0x68` | Acknowledge failure | Acknowledge failure |
+   | I2C2 | `0x69` | Acknowledge failure | Acknowledge failure |
+
+   The device remaining at I2C1/`0x69` was identified as onboard. Before it was
+   initialized, its power register read `0x40` (sleep enabled) and motion
+   registers were zero. Those initial zeros did not establish a sensor fault.
+6. **Correct the application.** Change `IMU_I2C_HANDLE` to `hi2c1` and
+   `MPU6050_ADDRESS_7BIT` to `0x69`. Keep the expected identity at `0x68`. Include
+   the selected bus/address in debugger status and USB reports so later tests
+   show which sensor is being read.
+7. **Rebuild, flash, and observe live status.** Verify the flash download, reset,
+   and inspect `imu_test` again. Identity and configuration checks passed. Run
+   between snapshots and confirm successful samples increase with no new errors.
+   The measured results are recorded below. `SystemCoreClock` was 72 MHz.
+8. **Finish the session.** Delete test breakpoints, detach GDB to resume the
+   application, and stop the diagnostic GDB server. The IMU test remains running
+   on the board.
+
+### Replay the debug process with the scripts
+
+The scripts are in `scripts/`:
+
+- `debug-onboard-imu.sh` locates CubeIDE's bundled tools, selects the ST-LINK
+  serial from `6storm32-test.launch` unless overridden, checks that the chosen
+  debug port is unused, starts the server, and captures logs.
+- `imu-debug.gdb` contains native GDB commands for the bus/address probes and
+  live sampling checks. CubeIDE's bundled GDB does not support Python scripting;
+  Python 3 runs on the Mac only for tool setup and ELF comparison.
+
+End any existing CubeIDE debug session first. From the repository root, inspect
+the available modes:
+
+```bash
+scripts/debug-onboard-imu.sh --help
+```
+
+To repeat the address checks, leave ST-LINK and board power connected, disconnect
+the board's USB data cable, and run:
+
+```bash
+scripts/debug-onboard-imu.sh probe
+```
+
+Probe mode attaches without flashing or resetting the sensor. It first reads
+flash bytes and compares `.isr_vector`, `.text`, and `.rodata` with the local ELF
+before calling target functions. The ST-LINK server's CRC-based
+`compare-sections` reported mismatches even when direct byte comparisons matched,
+so the script uses direct memory dumps instead.
+
+It then stops at `IMU_TestReport()`, after the application's I²C operations have
+finished, and probes both addresses on both buses. The USB-data restriction
+keeps the temporary diagnostic byte separate from an active CDC transmission.
+The byte is restored afterward. Repeat with the external IMU connected and
+unplugged to reproduce the identification table above.
+
+To build, flash/verify, reset, and check live samples for five seconds:
+
+```bash
+scripts/debug-onboard-imu.sh verify
+```
+
+For a longer run or another ST-LINK probe:
+
+```bash
+IMU_VERIFY_SECONDS=30 scripts/debug-onboard-imu.sh verify
+IMU_STLINK_SERIAL=YOUR_PROBE_SERIAL scripts/debug-onboard-imu.sh probe
+```
+
+Verify mode checks `IMU_TEST_OK`, an increasing sample count, and no increase in
+the error count during the observation interval. The duration uses firmware
+uptime, excluding time paused at breakpoints. Both modes delete their diagnostic
+breakpoints and detach afterward. Logs remain in the temporary directory printed
+by the wrapper. If startup stops in `Error_Handler()`, the script prints a
+backtrace and fails. Interrupt a stalled session with Ctrl+C and inspect its logs.
+
+Both script modes were exercised against the connected board. The five-second
+`verify` run passed with successful samples increasing from `12` to `251` and
+errors remaining `0`. Probe mode confirmed I2C1/`0x69` identity `0x68`, with
+acknowledge failures at the other three bus/address combinations.
+
 ### Hardware debug result — 2026-10-09
 
 The corrected firmware was flashed and verified through ST-LINK V3/SWD with the
