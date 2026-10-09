@@ -32,7 +32,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define LED_GREEN_PIN GPIO_PIN_12
+#define LED_RED_PIN GPIO_PIN_13
+#define LED_PORT GPIOB
+#define LED_TEST_INTERVAL_MS 500U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -122,6 +125,14 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* STorM32 v1.30 onboard LEDs are active high. */
+    HAL_GPIO_WritePin(LED_PORT, LED_GREEN_PIN, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(LED_PORT, LED_RED_PIN, GPIO_PIN_RESET);
+    HAL_Delay(LED_TEST_INTERVAL_MS);
+
+    HAL_GPIO_WritePin(LED_PORT, LED_GREEN_PIN, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(LED_PORT, LED_RED_PIN, GPIO_PIN_SET);
+    HAL_Delay(LED_TEST_INTERVAL_MS);
   }
   /* USER CODE END 3 */
 }
