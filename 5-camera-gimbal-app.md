@@ -4,7 +4,8 @@ Project: `6storm32-test`. This replaces the automatic fixed-field hold test with
 external-IMU feedback. The earlier behavior remains at tag `test-all-motors-hold`.
 The user tested each motor separately and reported all three axes working together
 on 2026-10-10. Those settings are now the firmware defaults, released at tag
-`camera-gimbal-app`. No automatic arming occurs on boot/reset. Small-motion testing
+`camera-gimbal-app`; the CubeIDE build compatibility fix is at
+`camera-gimbal-app-build-fix`. No automatic arming occurs on boot/reset. Small-motion testing
 is complete; large-angle performance and load/thermal limits are not characterized.
 
 ## Hardware and orientation
@@ -211,6 +212,7 @@ Disconnecting 3S is the physical motor-power removal.
 | `Core/Src/main.c` | CubeMX initialization and app calls in USER CODE sections |
 | `USB_DEVICE/App/usbd_cdc_if.c` | Forward received CDC bytes to bounded application buffer |
 | `scripts/test-gimbal.py` | Compile actual firmware modules with host HAL mocks |
+| `scripts/test-gimbal-build.py` | Verify build-hook linking before/after CubeIDE regenerates object lists |
 | `scripts/debug-gimbal.sh` | Build/flash/live SWD verification or inspect/probe |
 | `scripts/gimbal-console.py` | Standard-library USB CDC terminal |
 
@@ -224,6 +226,7 @@ With motor power disconnected:
 
 ```bash
 python3 scripts/test-gimbal.py
+python3 scripts/test-gimbal-build.py
 scripts/debug-gimbal.sh verify
 # Later, without flashing (requires matching current ELF):
 scripts/debug-gimbal.sh inspect
@@ -331,3 +334,23 @@ USB/ST-LINK remained connected. Verification passed:
 The powered results above are user observations, not measured torque/current,
 thermal limits or full-range stabilization qualification. Settings are specific to
 this camera mounting and motor wiring.
+
+
+### CubeIDE build compatibility fix — 2026-10-10
+
+After CubeIDE regenerated `Debug/Core/Src/subdir.mk` and `objects.list`, linking
+failed with multiple definitions of `gimbal`, `Gimbal_Init`, and other gimbal
+symbols. The generated paths were `./Core/Src/gimbal_*.o`, while `makefile.defs`
+compared them with `Core/Src/gimbal_*.o`. It therefore added the same modules again
+through `USER_OBJS`. The initial command-line build had used the older object list
+without those modules, so it did not expose this problem.
+
+The hook now normalizes the leading `./` on existing `OBJS` and `USER_OBJS` before
+adding missing modules. Generated CubeIDE build files do not need manual edits.
+The actual regenerated build now passes: text=84256, data=860, BSS=8660 bytes.
+`python3 scripts/test-gimbal-build.py` passed five cases: missing modules, bare
+paths, CubeIDE-prefixed paths, mixed/partial lists and existing user objects.
+
+Release: follow-up commit and tag `camera-gimbal-app-build-fix`. To rebuild in
+CubeIDE, use **Project > Build Project**. No firmware behavior or motor settings
+changed, and this fix does not flash the board.
