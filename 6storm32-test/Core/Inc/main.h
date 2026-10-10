@@ -55,9 +55,8 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-void Motor_TestTick(void);
-void Motor_TestEmergencyStop(void);
-
+void Gimbal_Tick(void);
+void Gimbal_EmergencyStop(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

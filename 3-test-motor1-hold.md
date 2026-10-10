@@ -1,5 +1,7 @@
 # 3 — Add MOT1 pitch hold
 
+> Current firmware: [camera gimbal app](5-camera-gimbal-app.md). This document describes the historical component-test tag.
+
 Project: `6storm32-test`. This extends the tagged MOT0-only test described in
 [2-test-motor0-hold.md](2-test-motor0-hold.md). MOT0 and MOT1 now hold together;
 MOT2 stays inactive in this earlier stage. The current all-three-motor version

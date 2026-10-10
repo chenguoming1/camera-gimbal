@@ -1,5 +1,7 @@
 # 2 — MOT0 roll hold test
 
+> Current firmware: [camera gimbal app](5-camera-gimbal-app.md). This document describes the historical component-test tag.
+
 Git tag: `test-motor0-hold`.
 
 This document describes that tagged checkpoint. The current three-motor version

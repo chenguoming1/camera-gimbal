@@ -1,5 +1,7 @@
 # 1 — Onboard MPU6050 test
 
+> Current firmware: [camera gimbal app](5-camera-gimbal-app.md). This document describes the historical component-test tag.
+
 - Project: `6storm32-test`
 - Source: `6storm32-test/Core/Src/main.c`
 - Hardware: connected STorM32 board; IMU wiring verified through SWD

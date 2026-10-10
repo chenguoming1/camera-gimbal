@@ -1,0 +1,7 @@
+# Include new application modules in an existing generated command-line build.
+# CubeIDE regenerates its own source list; filter avoids duplicate link inputs.
+GIMBAL_APP_OBJS := $(patsubst ../Core/Src/%.c,Core/Src/%.o,$(wildcard ../Core/Src/gimbal_*.c))
+GIMBAL_EXTRA_OBJS := $(filter-out $(OBJS),$(GIMBAL_APP_OBJS))
+OBJS += $(GIMBAL_EXTRA_OBJS)
+USER_OBJS += $(GIMBAL_EXTRA_OBJS)
+-include $(GIMBAL_APP_OBJS:.o=.d)

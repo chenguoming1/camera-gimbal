@@ -1,5 +1,7 @@
 # 4 — Hold all three motors
 
+> Current firmware: [camera gimbal app](5-camera-gimbal-app.md). This document describes the historical component-test tag.
+
 Git tag: `test-all-motors-hold`.
 
 Project: `6storm32-test`. This extends the earlier

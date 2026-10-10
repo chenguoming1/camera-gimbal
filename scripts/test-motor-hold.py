@@ -6,6 +6,11 @@ import subprocess
 import tempfile
 
 source = (Path(__file__).resolve().parents[1] / '6storm32-test/Core/Src/main.c').read_text()
+if 'Gimbal_Init();' in source:
+    # Current app reuses the verified hardware mapping; retain this entry point.
+    import sys
+    sys.exit(subprocess.run([sys.executable, str(Path(__file__).with_name('test-gimbal.py'))]).returncode)
+
 def between(start, end):
     return source.split(start, 1)[1].split(end, 1)[0]
 mock = r'''

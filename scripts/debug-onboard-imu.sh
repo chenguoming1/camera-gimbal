@@ -15,8 +15,9 @@ Usage: scripts/debug-onboard-imu.sh probe|verify|motor
           then stop the hold and detach. Does not flash. Motor power must be off.
 
 All modes briefly halt the MCU. Disconnect motor power before using any mode;
-keep MCU/ST-LINK power connected. Verify inhibits automatic motor startup, and
-probe requests a motor stop before resuming. Resetting later re-enables startup.
+keep MCU/ST-LINK power connected. With the gimbal app, verify checks external
+0x68 samples and disarmed startup; motor checks disarmed outputs and stop latching.
+Legacy fixed-hold behavior is available at tag test-all-motors-hold.
 Probe requires this project's current ELF to match the firmware already flashed.
 
 Optional environment variables:
@@ -191,13 +192,20 @@ for name in ('.isr_vector', '.text', '.rodata'):
 PY
 fi
 gdb_script="$repo_root/scripts/imu-debug.gdb"
-if [[ "$mode" == motor ]]; then
+gimbal_mode=0
+nm_tool="$(dirname "$gdb")/arm-none-eabi-nm"
+if "$nm_tool" "$elf" | python3 -c 'import sys; sys.exit(not any([line.rstrip().endswith(" Gimbal_Init") for line in sys.stdin]))'; then
+  gdb_script="$repo_root/scripts/gimbal-debug.gdb"
+  case "$mode" in probe) gimbal_mode=1 ;; motor) gimbal_mode=2 ;; esac
+fi
+if [[ "$mode" == motor && "$gdb_script" != */gimbal-debug.gdb ]]; then
   gdb_script="$repo_root/scripts/motor-hold-debug.gdb"
 fi
 "$gdb" --quiet --batch "$elf" \
   -ex 'set pagination off' \
   -ex 'set confirm off' \
   -ex 'set remotetimeout 10' \
+  -ex "set \$gimbal_mode = $gimbal_mode" \
   -ex "set \$imu_probe_mode = $probe_mode" \
   -ex "set \$imu_verify_seconds = $verify_seconds" \
   -ex "target remote 127.0.0.1:$gdb_port" \
