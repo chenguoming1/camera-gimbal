@@ -7,8 +7,8 @@
 
 This document describes the IMU-only checkpoint `test-onboard-imu`. The current
 application also includes the automatic startup motor test described in
-[`2-test-motor0-hold.md`](2-test-motor0-hold.md). Its MOT0 PWM channels start at zero
-duty, then MOT0 is energized automatically after a two-second delay.
+[`4-test-all-motors-hold.md`](4-test-all-motors-hold.md). All three motor groups
+start at zero duty, then ramp up after a two-second delay.
 Disconnect motor power before using either IMU diagnostic script. The current
 scripts inhibit the automatic motor run during IMU checks; resetting the board
 later re-enables it. Follow the motor guide before flashing with motor power on.

@@ -11,7 +11,7 @@ Usage: scripts/debug-onboard-imu.sh probe|verify|motor
           Disconnect the board's USB data cable first; leave ST-LINK connected.
   verify  Build, flash and verify 6storm32-test, reset, check live IMU samples
           for 5 seconds, then resume and detach.
-  motor   Check the current MOT0-only hold registers and inactive motor GPIOs,
+  motor   Check the current three-motor hold registers and PWM pin configuration,
           then stop the hold and detach. Does not flash. Motor power must be off.
 
 All modes briefly halt the MCU. Disconnect motor power before using any mode;

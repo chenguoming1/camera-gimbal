@@ -59,7 +59,7 @@ typedef struct
   int32_t gyro_mdps[3];
   int32_t temperature_centi_c;
 } IMU_TestStatus;
-/* Fixed-field component test for MOT0 only; visible in Live Expressions. */
+/* Fixed-field component test for all three motors; visible in Live Expressions. */
 typedef enum
 {
   MOTOR_STARTUP_DELAY = 0,
@@ -88,6 +88,12 @@ typedef struct
   uint32_t elapsed_ms;
   uint16_t drive_permille; /* Differential PWM span; 400 = legacy 40% strength. */
   uint16_t compare[3]; /* PA7/PB0/PB1 = TIM3 CH2/CH3/CH4. */
+  uint16_t compare_motor1[3]; /* PA6/PA3/PA2 = TIM3 CH1, TIM2 CH4/CH3. */
+  uint16_t compare_motor2[3]; /* PB9/PA1/PB8 = TIM4 CH4, TIM2 CH2, TIM4 CH3. */
+  uint32_t timer4_cr1;
+  uint32_t timer4_ccer;
+  uint32_t timer2_cr1;
+  uint32_t timer2_ccer;
   uint32_t timer_cr1;
   uint32_t timer_ccer;
 } Motor_TestStatus;
@@ -126,16 +132,18 @@ typedef struct
 #define IMU_SAMPLE_INTERVAL_MS 20U
 #define IMU_REPORT_INTERVAL_MS 250U
 #define IMU_RETRY_INTERVAL_MS 1000U
-/* MOT0 only: PA7/PB0/PB1. Match the existing 2-DRV8313-test 40% strength.
+/* MOT0=roll, MOT1=pitch, MOT2=yaw. All use the existing 40% test strength.
  * DRV8313 receives centered 3-PWM; ENx/nSLEEP/nRESET must be high in hardware.
  * Strength is a differential duty span, not a current/torque percentage.
  */
 #define MOTOR_HOLD_DRIVE_PERMILLE 400U
 #define MOTOR_STARTUP_DELAY_MS 2000U
 #define MOTOR_RAMP_MS 1000U
-#define MOTOR_OUTPUT_ENABLE_MASK (TIM_CCER_CC2E | TIM_CCER_CC3E | TIM_CCER_CC4E)
+#define MOTOR_OUTPUT_ENABLE_MASK (TIM_CCER_CC1E | TIM_CCER_CC2E | TIM_CCER_CC3E | TIM_CCER_CC4E)
+#define MOTOR_TIM2_OUTPUT_ENABLE_MASK (TIM_CCER_CC2E | TIM_CCER_CC3E | TIM_CCER_CC4E)
+#define MOTOR_TIM4_OUTPUT_ENABLE_MASK (TIM_CCER_CC3E | TIM_CCER_CC4E)
 #if MOTOR_HOLD_DRIVE_PERMILLE > 400U
-#error "Do not exceed the existing 40 percent one-motor test strength."
+#error "Do not exceed the existing 40 percent test strength."
 #endif
 /* USER CODE END PD */
 
@@ -196,16 +204,26 @@ static void Motor_Stop(Motor_StopReason reason);
 /* With DRV8313 ENx high, all INx low is braking, not static position hold. */
 static void Motor_ZeroOutputs(void)
 {
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 0U);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 0U);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, 0U);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0U);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, 0U);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 0U);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0U);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 0U);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0U);
   for (uint32_t i = 0U; i < 3U; i++)
   {
     motor_test.compare[i] = 0U;
+    motor_test.compare_motor1[i] = 0U;
+    motor_test.compare_motor2[i] = 0U;
   }
   motor_test.drive_permille = 0U;
   /* Apply zero even if a fault stopped the counter with preloads pending. */
   htim3.Instance->EGR = TIM_EGR_UG;
+  htim2.Instance->EGR = TIM_EGR_UG;
+  htim4.Instance->EGR = TIM_EGR_UG;
 }
 
 static void Motor_Stop(Motor_StopReason reason)
@@ -229,35 +247,58 @@ void Motor_TestEmergencyStop(void)
 
 static void Motor_TestInit(void)
 {
-  GPIO_InitTypeDef inactive = {0};
+  GPIO_InitTypeDef pwm = {0};
 
-  /* Keep MOT1/MOT2 inputs low as ordinary GPIOs; no split-timer drive. */
+  /* Disable all channels before restoring all nine motor pins to PWM. */
+  htim3.Instance->CR1 &= ~TIM_CR1_CEN;
   htim2.Instance->CR1 &= ~TIM_CR1_CEN;
   htim4.Instance->CR1 &= ~TIM_CR1_CEN;
   htim2.Instance->CCER = 0U;
   htim4.Instance->CCER = 0U;
   htim3.Instance->CCER = 0U;
-  htim3.Instance->SMCR = 0U; /* Independent TIM3; no master-trigger dependency. */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_6, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8 | GPIO_PIN_9, GPIO_PIN_RESET);
-  inactive.Mode = GPIO_MODE_OUTPUT_PP;
-  inactive.Pull = GPIO_NOPULL;
-  inactive.Speed = GPIO_SPEED_FREQ_LOW;
-  inactive.Pin = GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_6;
-  HAL_GPIO_Init(GPIOA, &inactive);
-  inactive.Pin = GPIO_PIN_8 | GPIO_PIN_9;
-  HAL_GPIO_Init(GPIOB, &inactive);
+  htim2.Instance->SMCR = 0U;
+  htim2.Instance->CR2 &= ~TIM_CR2_MMS;
+  htim3.Instance->SMCR = 0U;
+  htim4.Instance->SMCR = 0U;
+  pwm.Mode = GPIO_MODE_AF_PP;
+  pwm.Pull = GPIO_NOPULL;
+  pwm.Speed = GPIO_SPEED_FREQ_LOW;
+  pwm.Pin = GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_6 | GPIO_PIN_7;
+  HAL_GPIO_Init(GPIOA, &pwm);
+  pwm.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_8 | GPIO_PIN_9;
+  HAL_GPIO_Init(GPIOB, &pwm);
 
   Motor_ZeroOutputs();
+  /* RM0008: TIM3/TIM4 ITR1 receive TIM2 TRGO. Arm both slaves first.
+   * All use the same 72 MHz clock/period; hardware start aligns carriers.
+   */
+  htim2.Instance->CNT = 0U;
+  htim3.Instance->CNT = 0U;
+  htim4.Instance->CNT = 0U;
+  htim4.Instance->SMCR = TIM_TS_ITR1 | TIM_SLAVEMODE_TRIGGER;
+  htim3.Instance->SMCR = TIM_TS_ITR1 | TIM_SLAVEMODE_TRIGGER;
+  htim2.Instance->CR2 = (htim2.Instance->CR2 & ~TIM_CR2_MMS) | TIM_TRGO_ENABLE;
   if (__HAL_TIM_GET_AUTORELOAD(&htim3) != 3599U || htim3.Instance->PSC != 0U ||
+      __HAL_TIM_GET_AUTORELOAD(&htim2) != 3599U || htim2.Instance->PSC != 0U ||
+      __HAL_TIM_GET_AUTORELOAD(&htim4) != 3599U || htim4.Instance->PSC != 0U ||
+      HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4) != HAL_OK ||
+      HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3) != HAL_OK ||
+      HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK ||
       HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2) != HAL_OK ||
       HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3) != HAL_OK ||
-      HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4) != HAL_OK)
+      HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4) != HAL_OK ||
+      HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_4) != HAL_OK ||
+      HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3) != HAL_OK ||
+      HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2) != HAL_OK)
   {
     Motor_Stop(MOTOR_STOP_TIMER);
     motor_test.state = MOTOR_FAULT;
     return;
   }
+  motor_test.timer4_cr1 = htim4.Instance->CR1;
+  motor_test.timer4_ccer = htim4.Instance->CCER;
+  motor_test.timer2_cr1 = htim2.Instance->CR1;
+  motor_test.timer2_ccer = htim2.Instance->CCER;
   motor_test.timer_cr1 = htim3.Instance->CR1;
   motor_test.timer_ccer = htim3.Instance->CCER;
   motor_boot_ms = HAL_GetTick();
@@ -283,15 +324,33 @@ static void Motor_SetHold(uint16_t strength)
   for (uint32_t i = 0U; i < 3U; i++)
   {
     motor_test.compare[i] = compare[i];
+    motor_test.compare_motor1[i] = compare[i];
+    motor_test.compare_motor2[i] = compare[i];
   }
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, compare[0]);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, compare[1]);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, compare[2]);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, compare[0]);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, compare[1]);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, compare[2]);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, compare[0]);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, compare[1]);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, compare[2]);
   motor_test.drive_permille = strength;
 }
 
 static void Motor_Start(uint32_t now)
 {
+  /* Re-align carriers after a stop forced separate update events. Compares
+   * are zero here; TIM2 enable releases both armed trigger-mode counters.
+   */
+  htim2.Instance->CR1 &= ~TIM_CR1_CEN;
+  htim3.Instance->CR1 &= ~TIM_CR1_CEN;
+  htim4.Instance->CR1 &= ~TIM_CR1_CEN;
+  htim2.Instance->CNT = 0U;
+  htim3.Instance->CNT = 0U;
+  htim4.Instance->CNT = 0U;
+  htim2.Instance->CR1 |= TIM_CR1_CEN;
   motor_started_ms = now;
   motor_test.elapsed_ms = 0U;
   motor_test.runs++;
@@ -307,6 +366,10 @@ void Motor_TestTick(void)
     return;
   }
   uint32_t now = HAL_GetTick();
+  motor_test.timer4_cr1 = htim4.Instance->CR1;
+  motor_test.timer4_ccer = htim4.Instance->CCER;
+  motor_test.timer2_cr1 = htim2.Instance->CR1;
+  motor_test.timer2_ccer = htim2.Instance->CCER;
   motor_test.timer_cr1 = htim3.Instance->CR1;
   motor_test.timer_ccer = htim3.Instance->CCER;
   if (motor_test.request_stop)
@@ -320,7 +383,14 @@ void Motor_TestTick(void)
     return;
   }
   if ((motor_test.timer_cr1 & TIM_CR1_CEN) == 0U ||
-      (motor_test.timer_ccer & MOTOR_OUTPUT_ENABLE_MASK) != MOTOR_OUTPUT_ENABLE_MASK)
+      motor_test.timer_ccer != MOTOR_OUTPUT_ENABLE_MASK ||
+      (motor_test.timer2_cr1 & TIM_CR1_CEN) == 0U ||
+      motor_test.timer2_ccer != MOTOR_TIM2_OUTPUT_ENABLE_MASK ||
+      (motor_test.timer4_cr1 & TIM_CR1_CEN) == 0U ||
+      motor_test.timer4_ccer != MOTOR_TIM4_OUTPUT_ENABLE_MASK ||
+      htim4.Instance->SMCR != (TIM_TS_ITR1 | TIM_SLAVEMODE_TRIGGER) ||
+      htim3.Instance->SMCR != (TIM_TS_ITR1 | TIM_SLAVEMODE_TRIGGER) ||
+      (htim2.Instance->CR2 & TIM_CR2_MMS) != TIM_TRGO_ENABLE)
   {
     Motor_Stop(MOTOR_STOP_TIMER);
     motor_test.state = MOTOR_FAULT;
@@ -519,7 +589,7 @@ static void IMU_TestReport(void)
   }
 
   int tail = snprintf(&imu_usb_line[length], sizeof(imu_usb_line) - (size_t)length,
-      " motor=0 motor_state=%u motor_stop=%u motor_run=%lu motor_ms=%lu drive_permille=%u\r\n",
+      " motors=0,1,2 motor_state=%u motor_stop=%u motor_run=%lu motor_ms=%lu drive_permille=%u\r\n",
       (unsigned int)motor_test.state, (unsigned int)motor_test.stop_reason,
       (unsigned long)motor_test.runs, (unsigned long)motor_test.elapsed_ms,
       (unsigned int)motor_test.drive_permille);

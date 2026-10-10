@@ -1,6 +1,9 @@
-# 2 — MOT0 hold test
+# 2 — MOT0 roll hold test
 
 Git tag: `test-motor0-hold`.
+
+This document describes that tagged checkpoint. The current three-motor version
+is documented in [4-test-all-motors-hold.md](4-test-all-motors-hold.md).
 
 Project: `6storm32-test`. Test one motor before adding yaw movement or additional
 axes. The connected board has DRV8313 drivers and the user uses a 3S motor supply.
